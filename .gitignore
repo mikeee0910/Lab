@@ -1,0 +1,28 @@
+# --- STM32CubeIDE / Eclipse 相關 ---
+# 排除編譯產出的中間檔與執行檔 (這是最大的垃圾來源)
+**/Debug/
+**/Release/
+**/bin/
+**/obj/
+
+# 排除 IDE 自動生成的列表檔案
+*.list
+*.map
+*.elf
+*.hex
+*.bin
+
+# 排除 IDE 個人化設定 (別人的電腦路徑不同，傳上去會衝突)
+.metadata/
+.recommenders/
+**/RemoteSystemsTempFiles/
+*.bak
+
+# --- 專案特定檔案 ---
+# 如果你有使用 CubeMX 產生的備份檔
+*.tmp
+*.bak
+
+# --- 作業系統相關 ---
+Thumbs.db
+.DS_Store
