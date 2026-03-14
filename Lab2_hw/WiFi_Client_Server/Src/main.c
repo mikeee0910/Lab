@@ -25,14 +25,16 @@
 #define TERMINAL_USE
 
 /* Update SSID and PASSWORD with own Access point settings */
-#define SSID     "ACLAB"
-#define PASSWORD "ACLAB3233"
+//#define SSID     "ACLAB"
+//#define PASSWORD "ACLAB3233"
+#define SSID     "Meng"
+#define PASSWORD "11112222"
 
-uint8_t RemoteIP[] = {192,168,1,76};
+uint8_t RemoteIP[] = {172,20,10,4};
 #define RemotePORT	8002
 
 #define WIFI_WRITE_TIMEOUT 10000
-#define WIFI_READ_TIMEOUT  10000
+#define WIFI_READ_TIMEOUT  100
 
 #define CONNECTION_TRIAL_MAX          10
 
@@ -47,7 +49,8 @@ uint8_t RemoteIP[] = {192,168,1,76};
 extern UART_HandleTypeDef hDiscoUart;
 #endif /* TERMINAL_USE */
 static uint8_t RxData [500];
-
+volatile uint8_t Motion_Detected_Flag = 0 ;
+extern void SENSOR_IO_Write(uint8_t Addr, uint8_t Reg, uint8_t Value);
 
 /* Private function prototypes -----------------------------------------------*/
 #if defined (TERMINAL_USE)
@@ -61,8 +64,7 @@ static uint8_t RxData [500];
 #endif /* TERMINAL_USE */
 
 static void SystemClock_Config(void);
-
-
+static void MX_GPIO_EXTI_Init(void);
 
 extern  SPI_HandleTypeDef hspi;
 
@@ -116,13 +118,28 @@ int main(void)
   TERMOUT("   with port(8002).\n");
   TERMOUT("3- Get the Network Name or IP Address of your Android from the step 2.\n\n");
 
-  /* 初始化 3D 加速度計 */
-  if (BSP_ACCELERO_Init() != ACCELERO_OK) {
-	TERMOUT("> ERROR: Accelerometer Initialization Failed\n");
-  } else {
-	TERMOUT("> Accelerometer Initialized OK\n");
-  }
 
+  /* 初始化中斷接收腳位 */
+    MX_GPIO_EXTI_Init();
+
+    /* 初始化 3D 加速度計與顯著運動功能 */
+    if (BSP_ACCELERO_Init() != ACCELERO_OK) {
+      TERMOUT("> ERROR: Accelerometer Initialization Failed\n");
+    } else {
+      TERMOUT("> Accelerometer Initialized OK\n");
+
+
+		// 改用 Wake-Up (任意晃動) 中斷功能
+		// 1. 開啟基本中斷功能 (寫入 TAP_CFG 暫存器 0x58, 設為 0x80)
+		SENSOR_IO_Write(0xD4, 0x58, 0x80);
+
+		// 2. 設定晃動敏感度閾值 (寫入 WAKE_UP_THS 暫存器 0x5B, 設為 0x02，數字越小越敏感)
+		SENSOR_IO_Write(0xD4, 0x5B, 0x02);
+
+		// 3. 將 Wake-Up 中斷訊號綁定到 INT1 接腳 (寫入 MD1_CFG 暫存器 0x5E, 設為 0x20)
+		SENSOR_IO_Write(0xD4, 0x5E, 0x20);
+      TERMOUT("> Significant Motion Detection Enabled!\n");
+    }
 
   /*Initialize  WIFI module */
   if(WIFI_Init() ==  WIFI_STATUS_OK)
@@ -197,38 +214,32 @@ int main(void)
 
   while(1)
   {
-    if(Socket != -1)
-    {
-      ret = WIFI_ReceiveData(Socket, RxData, sizeof(RxData)-1, &Datalen, WIFI_READ_TIMEOUT);
-      if(ret == WIFI_STATUS_OK)
+      if(Socket != -1)
       {
-        if(Datalen > 0)
-        {
-          RxData[Datalen]=0;
-          TERMOUT("Received: %s\n",RxData);
-          // 1. 讀取加速度計數值
+          // ====== 1. 震動事件 ======
+          if (Motion_Detected_Flag == 1)
+          {
+              char warningMsg[] = "\r\n[EVENT] Significant Motion Detected!\r\n";
+              TERMOUT("[EVENT] Significant Motion Detected!\r\n"); // ← 改成字串字面量
+              WIFI_SendData(Socket, (uint8_t*)warningMsg, strlen(warningMsg), &Datalen, WIFI_WRITE_TIMEOUT);
+              Motion_Detected_Flag = 0;
+              HAL_Delay(100); // ← 給 Wi-Fi 喘息，但不 continue
+          }
+
+          // ====== 2. 每輪都送 ACC（包含晃動當下的數值）======
           BSP_ACCELERO_AccGetXYZ(accel_data);
-
-          // 2. 把數值格式化成字串塞進 TxData (記得包含換行符號 \r\n 讓接收端好辨識)
           sprintf(TxData, "ACC: X=%d, Y=%d, Z=%d\r\n", accel_data[0], accel_data[1], accel_data[2]);
-          TERMOUT("Sending: %s", TxData); // 在 PuTTY 也印出來方便除錯
+          TERMOUT("Sending: %s", TxData);
 
-          // 3. 發送資料 (請注意這裡從 sizeof 變成了 strlen，因為字串長度是變動的)
           ret = WIFI_SendData(Socket, (uint8_t*)TxData, strlen(TxData), &Datalen, WIFI_WRITE_TIMEOUT);
-
           if (ret != WIFI_STATUS_OK)
           {
-            TERMOUT("> ERROR : Failed to Send Data, connection closed\n");
-            break;
+              TERMOUT("> ERROR : Failed to Send Data\n");
+              break;
           }
-        }
+
+          HAL_Delay(50);
       }
-      else
-      {
-        TERMOUT("> ERROR : Failed to Receive Data, connection closed\n");
-        break;
-      }
-    }
   }
 }
 
@@ -290,6 +301,26 @@ static void SystemClock_Config(void)
   }
 }
 
+static void MX_GPIO_EXTI_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* 1. 開啟 GPIOD 的時鐘 (LSM6DSL 的 INT1 接在 PD11) */
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  /* 2. 設定 PD11 為外部中斷輸入模式 (偵測上升緣 RISING) */
+  GPIO_InitStruct.Pin = GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /* 3. 設定中斷優先級並啟動 EXTI 線路 10 到 15 的中斷 */
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+}
+
+
+
 #if defined (TERMINAL_USE)
 /**
   * @brief  Retargets the C library TERMOUT function to the USART.
@@ -331,13 +362,26 @@ void assert_failed(uint8_t* file, uint32_t line)
   * @param  GPIO_Pin: Specifies the port pin connected to corresponding EXTI line.
   * @retval None
   */
+
+
+void EXTI15_10_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_11);
+}
+
+// ====== 把 PIN_11 加進去 ======
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   switch (GPIO_Pin)
   {
-    case (GPIO_PIN_1):
+    case (GPIO_PIN_1): // 原本的 Wi-Fi 中斷
     {
       SPI_WIFI_ISR();
+      break;
+    }
+    case (GPIO_PIN_11): // 新增的 LSM6DSL 顯著運動中斷
+    {
+      Motion_Detected_Flag = 1; // 舉起旗標，通知 while(1) 迴圈有震動發生
       break;
     }
     default:
@@ -346,7 +390,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
   }
 }
-
 void SPI3_IRQHandler(void)
 {
   HAL_SPI_IRQHandler(&hspi);
